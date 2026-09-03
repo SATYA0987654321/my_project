@@ -1,0 +1,13 @@
+pandas
+numpy
+scikit-learn
+matplotlib
+reportlab
+pdfplumber
+mysql-connector-python
+bcrypt
+fastapi
+uvicorn
+python-multipart
+itsdangerous
+email-validator

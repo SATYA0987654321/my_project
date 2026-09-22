@@ -1,41 +1,72 @@
-import mysql.connector
+import os
+import json
 import sqlite3
 import bcrypt
-import json
-import os
 import random
-
 import tempfile
+from urllib.parse import urlparse, unquote
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+# Dynamic database driver imports
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except ImportError:
+    psycopg2 = None
+
+try:
+    import pymysql
+    import pymysql.cursors
+except ImportError:
+    pymysql = None
+
+try:
+    import mysql.connector
+except ImportError:
+    mysql = None
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 config_path = os.path.join(BASE_DIR, "config.json")
 
-_use_sqlite = False
+_active_db_type = None  # 'postgres', 'mysql', 'sqlite'
+
 
 def get_sqlite_db_path():
-    """Returns a writable path for SQLite database, supporting Vercel and Serverless environments."""
+    """Returns a writable path for SQLite database, supporting Vercel, Docker, and Serverless environments."""
     if os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
         return os.path.join(tempfile.gettempdir(), "resume_analyzer.db")
     return os.path.join(BASE_DIR, "resume_analyzer.db")
 
+
 def load_config():
+    """Loads database config from config.json if available."""
     if not os.path.exists(config_path):
-        return {
-            "mysql": {
-                "host": "localhost",
-                "port": 3306,
-                "user": "root",
-                "password": "",
-                "database": "resume_gap_analyzer"
-            }
-        }
+        return {}
     try:
-        with open(config_path, "r") as f:
+        with open(config_path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        return {"mysql": {}}
+        return {}
+
+
+def get_db_type(conn):
+    """Detects database engine type from a connection object."""
+    if hasattr(conn, 'row_factory'):
+        return 'sqlite'
+    if psycopg2 and isinstance(conn, psycopg2.extensions.connection):
+        return 'postgres'
+    if 'psycopg' in str(type(conn)).lower():
+        return 'postgres'
+    return 'mysql'
+
 
 def init_sqlite_db():
+    """Initializes the SQLite schema."""
     db_path = get_sqlite_db_path()
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
@@ -45,7 +76,7 @@ def init_sqlite_db():
             username TEXT UNIQUE NOT NULL,
             email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
-            is_verified INTEGER DEFAULT 0,
+            is_verified INTEGER DEFAULT 1,
             verification_code TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
@@ -95,71 +126,328 @@ def init_sqlite_db():
     """)
     conn.commit()
     conn.close()
-    print("SQLite database initialized successfully at", db_path)
+
+
+def init_postgres_db(conn):
+    """Initializes PostgreSQL schema."""
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(100) UNIQUE NOT NULL,
+            email VARCHAR(255) UNIQUE NOT NULL,
+            password_hash VARCHAR(255) NOT NULL,
+            is_verified INT DEFAULT 1,
+            verification_code VARCHAR(20),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_resumes (
+            user_id INT PRIMARY KEY,
+            name VARCHAR(255),
+            phone VARCHAR(50),
+            email VARCHAR(255),
+            location VARCHAR(255),
+            linkedin VARCHAR(255),
+            objective TEXT,
+            education TEXT,
+            languages TEXT,
+            tools TEXT,
+            concepts TEXT,
+            achievements TEXT,
+            activities TEXT,
+            "database" TEXT,
+            extra_curricular TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_projects (
+            id SERIAL PRIMARY KEY,
+            user_id INT NOT NULL,
+            title VARCHAR(255) NOT NULL,
+            description TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS analyses (
+            id SERIAL PRIMARY KEY,
+            user_id INT NOT NULL,
+            job_role VARCHAR(255) NOT NULL,
+            match_score DOUBLE PRECISION NOT NULL,
+            matched_skills TEXT NOT NULL,
+            missing_skills TEXT NOT NULL,
+            analyzed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+    """)
+    conn.commit()
+    cursor.close()
+
+
+def init_mysql_db(conn):
+    """Initializes MySQL schema."""
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            username VARCHAR(100) UNIQUE NOT NULL,
+            email VARCHAR(255) UNIQUE NOT NULL,
+            password_hash VARCHAR(255) NOT NULL,
+            is_verified INT DEFAULT 1,
+            verification_code VARCHAR(20),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_resumes (
+            user_id INT PRIMARY KEY,
+            name VARCHAR(255),
+            phone VARCHAR(50),
+            email VARCHAR(255),
+            location VARCHAR(255),
+            linkedin VARCHAR(255),
+            objective TEXT,
+            education TEXT,
+            languages TEXT,
+            tools TEXT,
+            concepts TEXT,
+            achievements TEXT,
+            activities TEXT,
+            `database` TEXT,
+            extra_curricular TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_projects (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id INT NOT NULL,
+            title VARCHAR(255) NOT NULL,
+            description TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS analyses (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id INT NOT NULL,
+            job_role VARCHAR(255) NOT NULL,
+            match_score DOUBLE NOT NULL,
+            matched_skills TEXT NOT NULL,
+            missing_skills TEXT NOT NULL,
+            analyzed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+    """)
+    conn.commit()
+    cursor.close()
+
 
 def get_connection():
-    global _use_sqlite
-    
-    # In Vercel or cloud serverless environments, automatically use SQLite in writable /tmp
-    if os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
-        _use_sqlite = True
-        db_path = get_sqlite_db_path()
-        if not os.path.exists(db_path):
-            init_sqlite_db()
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+    """
+    Universal database connection factory.
+    Auto-detects and connects to PostgreSQL, MySQL, or SQLite based on:
+    1. DATABASE_URL / POSTGRES_URL / MYSQL_URL environment variables
+    2. DB_HOST, DB_USER, DB_PASSWORD, DB_NAME environment variables
+    3. config.json
+    4. SQLite fallback (in persistent path or /tmp on serverless)
+    """
+    global _active_db_type
 
-    if _use_sqlite:
-        db_path = get_sqlite_db_path()
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+    # 1. Check for Cloud Database Connection Strings (Render, Supabase, Neon, Railway, Heroku)
+    db_url = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL") or os.environ.get("POSTGRESQL_URL") or os.environ.get("MYSQL_URL")
     
-    try:
-        config = load_config().get("mysql", {})
-        if not config.get("host") or config.get("host") == "localhost":
-            # If no remote MySQL configured, fallback immediately
-            raise Exception("No active remote MySQL configured")
+    if db_url and db_url.strip():
+        db_url_clean = db_url.strip()
+        # Normalize postgres:// to postgresql://
+        if db_url_clean.startswith("postgres://"):
+            db_url_clean = "postgresql://" + db_url_clean[len("postgres://"):]
+        
+        parsed = urlparse(db_url_clean)
+        scheme = parsed.scheme.lower()
+
+        # Connect to PostgreSQL (Neon, Supabase, Render Postgres, etc.)
+        if "postgres" in scheme:
+            if psycopg2:
+                try:
+                    conn = psycopg2.connect(db_url_clean, cursor_factory=RealDictCursor)
+                    conn.autocommit = False
+                    _active_db_type = 'postgres'
+                    return conn
+                except Exception as e:
+                    print(f"Warning: PostgreSQL connection failed ({e}). Checking alternatives...")
+
+        # Connect to MySQL (TiDB, PlanetScale, Railway MySQL, etc.)
+        elif "mysql" in scheme:
+            host = parsed.hostname
+            port = parsed.port or 3306
+            user = parsed.username
+            password = unquote(parsed.password or "")
+            dbname = parsed.path.lstrip("/")
             
-        conn = mysql.connector.connect(
-            host=config.get("host", "localhost"),
-            port=config.get("port", 3306),
-            user=config.get("user", "root"),
-            password=config.get("password", ""),
-            database=config.get("database", "resume_gap_analyzer")
-        )
-        return conn
-    except Exception as e:
-        _use_sqlite = True
+            if pymysql:
+                try:
+                    conn = pymysql.connect(
+                        host=host, port=port, user=user, password=password, database=dbname,
+                        cursorclass=pymysql.cursors.DictCursor, autocommit=False
+                    )
+                    _active_db_type = 'mysql'
+                    return conn
+                except Exception as e:
+                    print(f"Warning: PyMySQL connection failed ({e}). Checking alternatives...")
+            elif mysql and hasattr(mysql, 'connector'):
+                try:
+                    conn = mysql.connector.connect(
+                        host=host, port=port, user=user, password=password, database=dbname
+                    )
+                    _active_db_type = 'mysql'
+                    return conn
+                except Exception as e:
+                    print(f"Warning: MySQL.connector failed ({e}). Checking alternatives...")
+
+    # 2. Check Individual Environment Variables (DB_HOST, DB_USER, etc.)
+    db_host = os.environ.get("DB_HOST")
+    if db_host and db_host != "localhost":
+        db_user = os.environ.get("DB_USER", "root")
+        db_password = os.environ.get("DB_PASSWORD", "")
+        db_name = os.environ.get("DB_NAME", "resume_gap_analyzer")
+        db_port = int(os.environ.get("DB_PORT", 5432 if os.environ.get("DB_TYPE") == "postgres" else 3306))
+        db_type = os.environ.get("DB_TYPE", "postgres" if db_port == 5432 else "mysql").lower()
+
+        if db_type == "postgres" and psycopg2:
+            try:
+                conn = psycopg2.connect(
+                    host=db_host, port=db_port, user=db_user, password=db_password, dbname=db_name,
+                    cursor_factory=RealDictCursor
+                )
+                _active_db_type = 'postgres'
+                return conn
+            except Exception as e:
+                print(f"Warning: Postgres connection from env failed ({e}).")
+        elif db_type == "mysql":
+            if pymysql:
+                try:
+                    conn = pymysql.connect(
+                        host=db_host, port=db_port, user=db_user, password=db_password, database=db_name,
+                        cursorclass=pymysql.cursors.DictCursor
+                    )
+                    _active_db_type = 'mysql'
+                    return conn
+                except Exception as e:
+                    print(f"Warning: PyMySQL connection from env failed ({e}).")
+            elif mysql and hasattr(mysql, 'connector'):
+                try:
+                    conn = mysql.connector.connect(
+                        host=db_host, port=db_port, user=db_user, password=db_password, database=db_name
+                    )
+                    _active_db_type = 'mysql'
+                    return conn
+                except Exception as e:
+                    print(f"Warning: MySQL connection from env failed ({e}).")
+
+    # 3. Check config.json (Local MySQL if configured)
+    cfg = load_config().get("mysql", {})
+    if cfg.get("host") and cfg.get("user"):
+        if mysql and hasattr(mysql, 'connector'):
+            try:
+                conn = mysql.connector.connect(
+                    host=cfg.get("host", "localhost"),
+                    port=int(cfg.get("port", 3306)),
+                    user=cfg.get("user", "root"),
+                    password=cfg.get("password", ""),
+                    database=cfg.get("database", "resume_gap_analyzer")
+                )
+                _active_db_type = 'mysql'
+                return conn
+            except Exception as e:
+                print(f"Local MySQL connection notice: {e}")
+        elif pymysql:
+            try:
+                conn = pymysql.connect(
+                    host=cfg.get("host", "localhost"),
+                    port=int(cfg.get("port", 3306)),
+                    user=cfg.get("user", "root"),
+                    password=cfg.get("password", ""),
+                    database=cfg.get("database", "resume_gap_analyzer"),
+                    cursorclass=pymysql.cursors.DictCursor
+                )
+                _active_db_type = 'mysql'
+                return conn
+            except Exception as e:
+                print(f"Local PyMySQL connection notice: {e}")
+
+    # 4. Universal Fallback to SQLite (Zero configuration needed)
+    _active_db_type = 'sqlite'
+    db_path = get_sqlite_db_path()
+    if not os.path.exists(db_path):
         init_sqlite_db()
-        db_path = get_sqlite_db_path()
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
 
 def is_sqlite_conn(conn):
-    return hasattr(conn, 'row_factory')
+    return get_db_type(conn) == 'sqlite'
+
 
 def execute_query(conn, cursor, query, params=()):
-    if is_sqlite_conn(conn):
-        # Translate MySQL parameter %s to SQLite ?
+    """Executes a parameterized SQL query with automatic syntax adaptation for SQLite, MySQL, and PostgreSQL."""
+    db_type = get_db_type(conn)
+    if db_type == 'sqlite':
         query = query.replace("%s", "?")
+    elif db_type == 'postgres':
+        query = query.replace("`database`", '"database"').replace("`extra_curricular`", '"extra_curricular"')
+    elif db_type == 'mysql':
+        query = query.replace('"database"', "`database`").replace('"extra_curricular"', "`extra_curricular`")
+    
     cursor.execute(query, params)
 
-def fetch_one(cursor, is_sqlite):
+
+def fetch_one(cursor, is_sqlite=None):
+    """Fetches a single row as a standardized dictionary."""
     row = cursor.fetchone()
     if row is None:
         return None
-    return dict(row) if is_sqlite else row
+    if isinstance(row, dict):
+        return row
+    if hasattr(row, 'keys'):
+        return dict(row)
+    if cursor.description:
+        col_names = [col[0] for col in cursor.description]
+        return dict(zip(col_names, row))
+    return row
 
-def fetch_all(cursor, is_sqlite):
+
+def fetch_all(cursor, is_sqlite=None):
+    """Fetches all rows as a standardized list of dictionaries."""
     rows = cursor.fetchall()
-    return [dict(row) for row in rows] if is_sqlite else rows
+    if not rows:
+        return []
+    result = []
+    for r in rows:
+        if isinstance(r, dict):
+            result.append(r)
+        elif hasattr(r, 'keys'):
+            result.append(dict(r))
+        elif cursor.description:
+            col_names = [col[0] for col in cursor.description]
+            result.append(dict(zip(col_names, r)))
+        else:
+            result.append(r)
+    return result
+
 
 def hash_password(password):
     salt = bcrypt.gensalt()
     return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
+
 
 def verify_password(password, hashed):
     try:
@@ -167,24 +455,42 @@ def verify_password(password, hashed):
     except Exception:
         return False
 
+
 def generate_otp():
     return "".join(random.choices("0123456789", k=6))
 
+
 def register_user(username, email, password):
     conn = get_connection()
-    is_sqlite = is_sqlite_conn(conn)
+    db_type = get_db_type(conn)
     cursor = conn.cursor()
     try:
         hashed = hash_password(password)
-        query = "INSERT INTO users (username, email, password_hash, is_verified, verification_code) VALUES (%s, %s, %s, 1, NULL)"
-        execute_query(conn, cursor, query, (username.strip(), email.strip().lower(), hashed))
+        if db_type == 'postgres':
+            query = "INSERT INTO users (username, email, password_hash, is_verified, verification_code) VALUES (%s, %s, %s, 1, NULL) RETURNING id"
+            execute_query(conn, cursor, query, (username.strip(), email.strip().lower(), hashed))
+            row = cursor.fetchone()
+            user_id = row['id'] if isinstance(row, dict) else (row[0] if row else None)
+        else:
+            query = "INSERT INTO users (username, email, password_hash, is_verified, verification_code) VALUES (%s, %s, %s, 1, NULL)"
+            execute_query(conn, cursor, query, (username.strip(), email.strip().lower(), hashed))
+            user_id = cursor.lastrowid
+        
         conn.commit()
-        user_id = cursor.lastrowid
+
+        if not user_id:
+            check_cursor = conn.cursor()
+            execute_query(conn, check_cursor, "SELECT id FROM users WHERE username = %s", (username.strip(),))
+            res_user = fetch_one(check_cursor)
+            if res_user:
+                user_id = res_user["id"]
+            check_cursor.close()
+
         print(f"\n[SIGNUP] User '{username}' registered and activated successfully.\n")
         return {"user_id": user_id, "username": username, "email": email}
     except Exception as e:
         err_msg = str(e)
-        if "UNIQUE" in err_msg or "Duplicate entry" in err_msg or (hasattr(e, 'errno') and e.errno == 1062):
+        if "UNIQUE" in err_msg or "Duplicate entry" in err_msg or "duplicate key" in err_msg or (hasattr(e, 'errno') and e.errno == 1062):
             raise Exception("Username or Email already registered.")
         else:
             raise e
@@ -192,10 +498,11 @@ def register_user(username, email, password):
         cursor.close()
         conn.close()
 
+
 def verify_user_otp(username_or_email, otp):
     conn = get_connection()
     is_sqlite = is_sqlite_conn(conn)
-    cursor = conn.cursor(dictionary=not is_sqlite)
+    cursor = conn.cursor()
     try:
         query = "SELECT id, username, verification_code, is_verified FROM users WHERE username = %s OR email = %s"
         execute_query(conn, cursor, query, (username_or_email.strip(), username_or_email.strip().lower()))
@@ -205,7 +512,6 @@ def verify_user_otp(username_or_email, otp):
         if user["is_verified"]:
             return {"success": True, "message": "Account already verified."}
         if user["verification_code"] == otp.strip():
-            # Update user status to verified
             update_query = "UPDATE users SET is_verified = 1, verification_code = NULL WHERE id = %s"
             update_cursor = conn.cursor()
             execute_query(conn, update_cursor, update_query, (user["id"],))
@@ -217,10 +523,11 @@ def verify_user_otp(username_or_email, otp):
         cursor.close()
         conn.close()
 
+
 def generate_and_update_otp(username_or_email):
     conn = get_connection()
     is_sqlite = is_sqlite_conn(conn)
-    cursor = conn.cursor(dictionary=not is_sqlite)
+    cursor = conn.cursor()
     try:
         query = "SELECT id, username, email, is_verified FROM users WHERE username = %s OR email = %s"
         execute_query(conn, cursor, query, (username_or_email.strip(), username_or_email.strip().lower()))
@@ -247,16 +554,17 @@ def generate_and_update_otp(username_or_email):
         cursor.close()
         conn.close()
 
+
 def authenticate_user(username, password):
     conn = get_connection()
     is_sqlite = is_sqlite_conn(conn)
-    cursor = conn.cursor(dictionary=not is_sqlite)
+    cursor = conn.cursor()
     try:
         query = "SELECT id, username, email, password_hash, is_verified FROM users WHERE username = %s OR email = %s"
         execute_query(conn, cursor, query, (username.strip(), username.strip().lower()))
         user = fetch_one(cursor, is_sqlite)
         if user and verify_password(password, user["password_hash"]):
-            if not user["is_verified"]:
+            if not user.get("is_verified", 1):
                 raise Exception("Account is not verified yet. Please verify your account.")
             return {
                 "id": user["id"],
@@ -268,76 +576,39 @@ def authenticate_user(username, password):
         cursor.close()
         conn.close()
 
+
 def run_migrations():
+    """Initializes schema and runs necessary column migrations on startup."""
     conn = get_connection()
-    if is_sqlite_conn(conn):
+    db_type = get_db_type(conn)
+    
+    if db_type == 'sqlite':
+        init_sqlite_db()
         conn.close()
+        return
+    elif db_type == 'postgres':
+        init_postgres_db(conn)
+        conn.close()
+        print("PostgreSQL database initialized and schema up to date.")
         return
         
     cursor = conn.cursor()
     try:
-        # Check if column `is_verified` exists in `users`
-        cursor.execute("""
-            SELECT COLUMN_NAME 
-            FROM INFORMATION_SCHEMA.COLUMNS 
-            WHERE TABLE_SCHEMA = DATABASE() 
-              AND TABLE_NAME = 'users' 
-              AND COLUMN_NAME = 'is_verified'
-        """)
-        if not cursor.fetchone():
-            print("Migration: Adding `is_verified` column to `users`...")
-            cursor.execute("ALTER TABLE users ADD COLUMN `is_verified` TINYINT DEFAULT 0;")
-            
-        # Check if column `verification_code` exists in `users`
-        cursor.execute("""
-            SELECT COLUMN_NAME 
-            FROM INFORMATION_SCHEMA.COLUMNS 
-            WHERE TABLE_SCHEMA = DATABASE() 
-              AND TABLE_NAME = 'users' 
-              AND COLUMN_NAME = 'verification_code'
-        """)
-        if not cursor.fetchone():
-            print("Migration: Adding `verification_code` column to `users`...")
-            cursor.execute("ALTER TABLE users ADD COLUMN `verification_code` VARCHAR(6) NULL;")
-
-        # Check if column `database` exists
-        cursor.execute("""
-            SELECT COLUMN_NAME 
-            FROM INFORMATION_SCHEMA.COLUMNS 
-            WHERE TABLE_SCHEMA = DATABASE() 
-              AND TABLE_NAME = 'user_resumes' 
-              AND COLUMN_NAME = 'database'
-        """)
-        if not cursor.fetchone():
-            print("Migration: Adding `database` column to `user_resumes`...")
-            cursor.execute("ALTER TABLE user_resumes ADD COLUMN `database` TEXT;")
-            
-        # Check if column `extra_curricular` exists
-        cursor.execute("""
-            SELECT COLUMN_NAME 
-            FROM INFORMATION_SCHEMA.COLUMNS 
-            WHERE TABLE_SCHEMA = DATABASE() 
-              AND TABLE_NAME = 'user_resumes' 
-              AND COLUMN_NAME = 'extra_curricular'
-        """)
-        if not cursor.fetchone():
-            print("Migration: Adding `extra_curricular` column to `user_resumes`...")
-            cursor.execute("ALTER TABLE user_resumes ADD COLUMN `extra_curricular` TEXT;")
-        
+        init_mysql_db(conn)
         conn.commit()
-        print("Migration: Check complete. Schema up to date.")
+        print("MySQL database initialized and schema up to date.")
     except Exception as e:
-        print(f"Migration: Error while running migrations: {e}")
+        print(f"Migration check warning: {e}")
     finally:
         cursor.close()
         conn.close()
 
+
 def save_resume(user_id, name, phone, email, location, linkedin, objective, education, languages, tools, concepts, achievements, activities, database, extra_curricular):
     conn = get_connection()
     is_sqlite = is_sqlite_conn(conn)
-    cursor = conn.cursor(dictionary=not is_sqlite)
+    cursor = conn.cursor()
     try:
-        # Check if exists
         check_query = "SELECT 1 FROM user_resumes WHERE user_id = %s"
         execute_query(conn, cursor, check_query, (user_id,))
         exists = fetch_one(cursor, is_sqlite)
@@ -367,10 +638,11 @@ def save_resume(user_id, name, phone, email, location, linkedin, objective, educ
         cursor.close()
         conn.close()
 
+
 def load_resume(user_id):
     conn = get_connection()
     is_sqlite = is_sqlite_conn(conn)
-    cursor = conn.cursor(dictionary=not is_sqlite)
+    cursor = conn.cursor()
     try:
         query = "SELECT * FROM user_resumes WHERE user_id = %s"
         execute_query(conn, cursor, query, (user_id,))
@@ -379,9 +651,9 @@ def load_resume(user_id):
         cursor.close()
         conn.close()
 
+
 def save_projects(user_id, projects):
     conn = get_connection()
-    is_sqlite = is_sqlite_conn(conn)
     cursor = conn.cursor()
     try:
         delete_query = "DELETE FROM user_projects WHERE user_id = %s"
@@ -397,22 +669,23 @@ def save_projects(user_id, projects):
         cursor.close()
         conn.close()
 
+
 def load_projects(user_id):
     conn = get_connection()
     is_sqlite = is_sqlite_conn(conn)
-    cursor = conn.cursor(dictionary=not is_sqlite)
+    cursor = conn.cursor()
     try:
         query = "SELECT title, description FROM user_projects WHERE user_id = %s ORDER BY id ASC"
         execute_query(conn, cursor, query, (user_id,))
         rows = fetch_all(cursor, is_sqlite)
-        return [{"title": row["title"], "desc": row["description"]} for row in rows]
+        return [{"title": row.get("title", ""), "desc": row.get("description", "")} for row in rows]
     finally:
         cursor.close()
         conn.close()
 
+
 def log_analysis(user_id, job_role, match_score, matched_skills, missing_skills):
     conn = get_connection()
-    is_sqlite = is_sqlite_conn(conn)
     cursor = conn.cursor()
     try:
         query = "INSERT INTO analyses (user_id, job_role, match_score, matched_skills, missing_skills) VALUES (%s, %s, %s, %s, %s)"
@@ -422,10 +695,11 @@ def log_analysis(user_id, job_role, match_score, matched_skills, missing_skills)
         cursor.close()
         conn.close()
 
+
 def load_analysis_history(user_id):
     conn = get_connection()
     is_sqlite = is_sqlite_conn(conn)
-    cursor = conn.cursor(dictionary=not is_sqlite)
+    cursor = conn.cursor()
     try:
         query = "SELECT job_role, match_score, matched_skills, missing_skills, analyzed_at FROM analyses WHERE user_id = %s ORDER BY analyzed_at DESC"
         execute_query(conn, cursor, query, (user_id,))

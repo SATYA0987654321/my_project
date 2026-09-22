@@ -38,19 +38,40 @@ from utils.db_helper import (
 )
 from utils.email_helper import send_verification_email
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+from fastapi.middleware.cors import CORSMiddleware
+
 # Run migrations on startup
 try:
     run_migrations()
 except Exception as e:
     print(f"Startup migrations failed: {e}")
 
-app = FastAPI(title="Elevora - Resume Skill Gap Analyzer & Career Intelligence API")
+app = FastAPI(
+    title="Elevora - Resume Skill Gap Analyzer & Career Intelligence API",
+    description="Production-ready FastAPI backend for ATS analysis, NLP career gap matching, and resume generation.",
+    version="2.0.0"
+)
+
+# Enable CORS for cross-origin deployment
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
-# Secret key for signing session cookie
-SECRET_KEY = "resume-analyzer-secure-key-1234!"
+# Secret key for signing session cookie (reads from ENV for production)
+SECRET_KEY = os.environ.get("SECRET_KEY", "resume-analyzer-secure-key-1234!")
 signer = Signer(SECRET_KEY)
 
 # Ensure static directory exists (safe for read-only serverless filesystems)
@@ -60,6 +81,15 @@ try:
     os.makedirs(os.path.join(STATIC_DIR, "js"), exist_ok=True)
 except Exception:
     pass
+
+# Health check endpoint for cloud hosting platforms (Render, Railway, K8s, AWS)
+@app.get("/api/health")
+def api_health():
+    return {
+        "status": "healthy",
+        "service": "Elevora Skill Gap Analyzer",
+        "version": "2.0.0"
+    }
 
 # Helper to get current user from signed cookie
 def get_current_user(session_id: Optional[str] = Cookie(None)):
@@ -445,4 +475,7 @@ if os.path.exists(ASSETS_DIR):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    host = os.environ.get("HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", 8000))
+    is_reload = os.environ.get("RELOAD", "false").lower() in ("true", "1")
+    uvicorn.run("main:app", host=host, port=port, reload=is_reload)

@@ -80,9 +80,22 @@ function showDashboard() {
     document.getElementById('auth-page').classList.add('hidden');
     document.getElementById('app-layout').classList.remove('hidden');
     
+    // Set dynamic greeting based on time of day
+    const hour = new Date().getHours();
+    let greeting = "Welcome back";
+    if (hour < 12) greeting = "Good morning";
+    else if (hour < 18) greeting = "Good afternoon";
+    else greeting = "Good evening";
+
+    const bannerHeading = document.querySelector('.banner-text h2');
+    if (bannerHeading) {
+        bannerHeading.innerHTML = `${greeting}, <span id="welcome-username" class="text-primary">${state.user.username}</span>!`;
+    }
+
     // Set user display names
     document.getElementById('user-display-name').innerText = state.user.username;
-    document.getElementById('welcome-username').innerText = state.user.username;
+    const welcomeUser = document.getElementById('welcome-username');
+    if (welcomeUser) welcomeUser.innerText = state.user.username;
 
     // Load initial dashboard data
     loadDashboardData();
@@ -238,7 +251,10 @@ function loadDashboardData() {
             if (totalAnalyses === 0) {
                 tableBody.innerHTML = `
                     <tr>
-                        <td colspan="5" class="text-center text-muted">No searches analyzed yet. Navigate to the Skill Analyzer to run your first check!</td>
+                        <td colspan="6" class="text-center text-muted" style="padding: 32px 16px;">
+                            <i class="fa-solid fa-clock-rotate-left text-muted" style="font-size: 2rem; margin-bottom: 10px; display: block;"></i>
+                            No searches analyzed yet. Navigate to the Skill Analyzer to run your first check!
+                        </td>
                     </tr>
                 `;
                 return;
